@@ -2,6 +2,8 @@ import orderModel from "../models/orderModel.js";
 import userModel from "../models/userModel.js";
 import Stripe from 'stripe'
 import razorpay from 'razorpay'
+import nodemailer from 'nodemailer';
+import { v4 as uuidv4 } from 'uuid'; // Ensure you install `uuid` package
 
 // global variables
 const currency = 'inr'
@@ -15,37 +17,50 @@ const razorpayInstance = new razorpay({
     key_secret : process.env.RAZORPAY_KEY_SECRET,
 })
 
-// Placing orders using COD Method
-const placeOrder = async (req,res) => {
-    
+
+
+const placeOrder = async (req, res) => {
     try {
-        
-        const { userId, items, amount, address} = req.body;
+        let { userId, items, amount, address } = req.body;
+        let user;
+
+        if (!userId.startsWith("guest_")) {
+            // 🔍 Regular user → Find by `_id`
+            if (!mongoose.Types.ObjectId.isValid(userId)) {
+                return res.status(400).json({ success: false, message: "Invalid User ID" });
+            }
+            user = await userModel.findById(userId);
+        } else {
+            // 🛒 Guest user → Find by `guestId`
+            user = await userModel.findOne({ guestId: userId });
+        }
+
+        if (!user) return res.status(404).json({ success: false, message: "User not found" });
 
         const orderData = {
-            userId,
+            userId: user._id, // ✅ Always use `_id` (MongoDB ObjectId)
             items,
             address,
             amount,
-            paymentMethod:"COD",
-            payment:false,
-            date: Date.now()
-        }
+            paymentMethod: "COD",
+            payment: false,
+            status: "Order Placed",
+            date: Date.now(),
+        };
 
-        const newOrder = new orderModel(orderData)
-        await newOrder.save()
+        const newOrder = new orderModel(orderData);
+        await newOrder.save();
 
-        await userModel.findByIdAndUpdate(userId,{cartData:{}})
+        // 🧹 Clear cart after order
+        await userModel.findByIdAndUpdate(user._id, { cartData: {} });
 
-        res.json({success:true,message:"Order Placed"})
-
+        res.json({ success: true, message: "Order Placed" });
 
     } catch (error) {
-        console.log(error)
-        res.json({success:false,message:error.message})
+        console.log(error);
+        res.status(500).json({ success: false, message: error.message });
     }
-
-}
+};
 
 // Placing orders using Stripe Method
 const placeOrderStripe = async (req,res) => {
@@ -185,6 +200,91 @@ const verifyRazorpay = async (req,res) => {
     }
 }
 
+const sendEmail = async (req, res) =>{
+    const { orderData } = req.body;
+
+    if (!orderData || !orderData.email) {
+        return res.status(400).json({ success: false, message: "Invalid order data" });
+    }
+
+    // Define email content
+    const { address, items, amount } = orderData;
+    const customerEmail = orderData.email;
+    const adminEmail = "anub0709@gmail.com"; // Replace with actual admin email
+
+    // Order Summary HTML Template
+    const emailTemplate = `
+    <html>
+    <body style="font-family: Arial, sans-serif;">
+        <div style="max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 20px; border-radius: 10px;">
+            <h2 style="color: #333; text-align: center;">Thank You for Your Order!</h2>
+            <p>Hello <strong>${address.firstName} ${address.lastName}</strong>,</p>
+            <p>We have received your order and it is now being processed. Here are your order details:</p>
+            
+            <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                    <tr>
+                        <th style="border-bottom: 1px solid #ddd; text-align: left; padding: 10px;">Item</th>
+                        <th style="border-bottom: 1px solid #ddd; text-align: right; padding: 10px;">Quantity</th>
+                        <th style="border-bottom: 1px solid #ddd; text-align: right; padding: 10px;">Price</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${items.map(item => `
+                    <tr>
+                        <td style="border-bottom: 1px solid #ddd; padding: 10px;">${item.name} (${item.size})</td>
+                        <td style="border-bottom: 1px solid #ddd; text-align: right; padding: 10px;">${item.quantity}</td>
+                        <td style="border-bottom: 1px solid #ddd; text-align: right; padding: 10px;">$${(item.price * item.quantity).toFixed(2)}</td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>
+
+            <h3 style="text-align: right; color: #333;">Total: $${amount.toFixed(2)}</h3>
+
+            <h4>Shipping Address:</h4>
+            <p>${address.street}, ${address.city}, ${address.state}, ${address.zipcode}, ${address.country}</p>
+
+            <p>If you have any questions, please contact us at <a href="mailto:support@example.com">support@example.com</a>.</p>
+            
+            <p style="text-align: center; color: #777;">Thank you for shopping with us!</p>
+        </div>
+    </body>
+    </html>
+    `;
+
+    try {
+        // Configure nodemailer transporter
+        const transporter = nodemailer.createTransport({
+            service: "Gmail",
+            auth: {
+                user: process.env.EMAIL_USER, // Your Gmail address
+                pass: process.env.EMAIL_PASS  // Your Gmail App Password
+            }
+        });
+
+        // Send email to customer
+        await transporter.sendMail({
+            from: `"Shop Name" <${process.env.EMAIL_USER}>`,
+            to: customerEmail,
+            subject: "Your Order Confirmation",
+            html: emailTemplate
+        });
+
+        // Send email to admin
+        await transporter.sendMail({
+            from: `"Shop Name" <${process.env.EMAIL_USER}>`,
+            to: adminEmail,
+            subject: "New Order Received",
+            html: emailTemplate
+        });
+
+        res.status(200).json({ success: true, message: "Email sent successfully" });
+
+    } catch (error) {
+        console.error("Error sending email:", error);
+        res.status(500).json({ success: false, message: "Failed to send email" });
+    }
+};
 
 // All Orders data for Admin Panel
 const allOrders = async (req,res) => {
@@ -201,20 +301,41 @@ const allOrders = async (req,res) => {
 
 }
 
-// User Order Data For Forntend
-const userOrders = async (req,res) => {
-    try {
-        
-        const { userId } = req.body
 
-        const orders = await orderModel.find({ userId })
-        res.json({success:true,orders})
+
+const userOrders = async (req, res) => {
+    try {
+        const { userId } = req.body;
+        let user;
+        console.log("user order:");  // ✅ Debugging
+
+        if (!userId) {
+            return res.status(400).json({ success: false, message: "User ID is required" });
+        }
+
+        if (!userId.startsWith("guest_")) {
+            // 🔍 Logged-in user → Find by `_id`
+            if (!mongoose.Types.ObjectId.isValid(userId)) {
+                return res.status(400).json({ success: false, message: "Invalid User ID" });
+            }
+            user = await userModel.findById(userId);
+        } else {
+            // 🛒 Guest user → Find by `guestId`
+            user = await userModel.findOne({ guestId: userId });
+        }
+
+        if (!user) return res.status(404).json({ success: false, message: "User not found" });
+
+        // Fetch orders using the actual MongoDB `_id`
+        const orders = await orderModel.find({ userId: user._id });
+
+        res.json({ success: true, orders });
 
     } catch (error) {
-        console.log(error)
-        res.json({success:false,message:error.message})
+        console.log(error);
+        res.status(500).json({ success: false, message: error.message });
     }
-}
+};
 
 // update order status from Admin Panel
 const updateStatus = async (req,res) => {
@@ -231,4 +352,4 @@ const updateStatus = async (req,res) => {
     }
 }
 
-export {verifyRazorpay, verifyStripe ,placeOrder, placeOrderStripe, placeOrderRazorpay, allOrders, userOrders, updateStatus}
+export {verifyRazorpay, verifyStripe ,placeOrder, placeOrderStripe, placeOrderRazorpay, sendEmail, allOrders, userOrders, updateStatus}

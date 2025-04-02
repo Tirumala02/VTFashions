@@ -2,6 +2,8 @@ import { createContext, useEffect, useState } from "react";
 import { toast } from "react-toastify";
 import { useNavigate } from "react-router-dom";
 import axios from 'axios'
+import Cookies from "js-cookie"; // Import js-cookie
+
 
 export const ShopContext = createContext();
 
@@ -15,44 +17,41 @@ const ShopContextProvider = (props) => {
     const [cartItems, setCartItems] = useState({});
     const [products, setProducts] = useState([]);
     const [token, setToken] = useState('')
+    const [tempUser, setTempUser] = useState(""); // Temporary user ID
     const navigate = useNavigate();
+
+    const generateTempUser = () => {
+        const array = new Uint8Array(8);
+        window.crypto.getRandomValues(array);
+        const guestId = `guest_${Array.from(array, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+
+        Cookies.set("tempUser", guestId, { expires: 30 }); // Store in cookies for 30 days
+        setTempUser(guestId);
+    };
+
+    console.log("Token:", token);
+    console.log("TempUser:", tempUser);
 
 
     const addToCart = async (itemId, size) => {
-
         if (!size) {
-            toast.error('Select Product Size');
+            toast.error("Select Product Size");
             return;
         }
 
         let cartData = structuredClone(cartItems);
-
-        if (cartData[itemId]) {
-            if (cartData[itemId][size]) {
-                cartData[itemId][size] += 1;
-            }
-            else {
-                cartData[itemId][size] = 1;
-            }
-        }
-        else {
-            cartData[itemId] = {};
-            cartData[itemId][size] = 1;
-        }
+        cartData[itemId] = cartData[itemId] || {};
+        cartData[itemId][size] = (cartData[itemId][size] || 0) + 1;
         setCartItems(cartData);
 
-        if (token) {
-            try {
-
-                await axios.post(backendUrl + '/api/cart/add', { itemId, size }, { headers: { token } })
-
-            } catch (error) {
-                console.log(error)
-                toast.error(error.message)
-            }
+        try {
+            const headers = token ? { token } : { "temp-user": tempUser };
+            await axios.post(backendUrl + "/api/cart/add", { itemId, size, userId: token || tempUser }, { headers });
+        } catch (error) {
+            console.log(error);
+            toast.error(error.message);
         }
-
-    }
+    };
 
     const getCartCount = () => {
         let totalCount = 0;
@@ -71,25 +70,18 @@ const ShopContextProvider = (props) => {
     }
 
     const updateQuantity = async (itemId, size, quantity) => {
-
         let cartData = structuredClone(cartItems);
-
         cartData[itemId][size] = quantity;
+        setCartItems(cartData);
 
-        setCartItems(cartData)
-
-        if (token) {
-            try {
-
-                await axios.post(backendUrl + '/api/cart/update', { itemId, size, quantity }, { headers: { token } })
-
-            } catch (error) {
-                console.log(error)
-                toast.error(error.message)
-            }
+        try {
+            const headers = token ? { token } : { "temp-user": tempUser };
+            await axios.post(backendUrl + "/api/cart/update", { itemId, size, quantity, userId: token || tempUser }, { headers });
+        } catch (error) {
+            console.log(error);
+            toast.error(error.message);
         }
-
-    }
+    };
 
     const getCartAmount = () => {
         let totalAmount = 0;
@@ -98,7 +90,7 @@ const ShopContextProvider = (props) => {
             for (const item in cartItems[items]) {
                 try {
                     if (cartItems[items][item] > 0) {
-                        totalAmount += itemInfo.price * cartItems[items][item];
+                        totalAmount += (itemInfo.offerPrice || itemInfo.price) * cartItems[items][item];
                     }
                 } catch (error) {
 
@@ -124,40 +116,73 @@ const ShopContextProvider = (props) => {
         }
     }
 
-    const getUserCart = async ( token ) => {
+   
+    const getUserCart = async () => {
+        if (!token && !tempUser) return;  
         try {
-            
-            const response = await axios.post(backendUrl + '/api/cart/get',{},{headers:{token}})
+            const userId = token ? token : tempUser;  
+    
+            const headers = token
+                ? { Authorization: `Bearer ${token}` }
+                : { "temp-user": tempUser };
+    
+            console.log("Fetching cart with:", { userId, headers });
+    
+            const response = await axios.post(backendUrl + "/api/cart/get", { userId }, { headers });
+            console.log("Cart response:", response.data);
             if (response.data.success) {
-                setCartItems(response.data.cartData)
+                setCartItems(response.data.cartData);
+            } else {
+                console.warn("Cart fetch failed:", response.data.message);
             }
         } catch (error) {
-            console.log(error)
-            toast.error(error.message)
+            console.error("Error fetching cart:", error);
+            toast.error(response.message);
         }
-    }
+    };    
+    
+
 
     useEffect(() => {
         getProductsData()
     }, [])
 
+
     useEffect(() => {
-        if (!token && localStorage.getItem('token')) {
-            setToken(localStorage.getItem('token'))
-            getUserCart(localStorage.getItem('token'))
+        const storedToken = localStorage.getItem("token");
+    
+        if (storedToken) {
+            setToken(storedToken);
+            getUserCart(); // ✅ Fetch user cart
+        } else {
+            const storedTempUser = Cookies.get("tempUser");
+    
+            if (!storedTempUser) {
+                generateTempUser(); // ✅ Create a guest ID if not found
+            } else {
+                setTempUser(storedTempUser);
+                getUserCart(); // ✅ Fetch guest cart
+            }
         }
-        if (token) {
-            getUserCart(token)
+    }, [tempUser]);
+    
+    useEffect(() => {
+        const headers = token ? { token } : { "temp-user": tempUser };
+    
+        if (token || tempUser) {  // ✅ Run only when either is available
+            console.log("Fetching cart with headers:", headers);
+            getUserCart(token || tempUser);
         }
-    }, [token])
+    }, [token, tempUser]);  // ✅ Runs when token or guest ID is set
+    
 
     const value = {
         products, currency, delivery_fee,
         search, setSearch, showSearch, setShowSearch,
-        cartItems, addToCart,setCartItems,
+        cartItems, addToCart, setCartItems,
         getCartCount, updateQuantity,
         getCartAmount, navigate, backendUrl,
-        setToken, token
+        setToken, token, tempUser, setTempUser
     }
 
     return (

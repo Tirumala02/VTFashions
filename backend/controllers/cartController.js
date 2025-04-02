@@ -1,75 +1,89 @@
 import userModel from "../models/userModel.js"
-
+import mongoose from "mongoose"
+// const generateGuestId = () => `guest_${crypto.randomBytes(8).toString('hex')}`;
 
 // add products to user cart
-const addToCart = async (req,res) => {
+// addToCart function (Backend)
+const addToCart = async (req, res) => {
     try {
-        
-        const { userId, itemId, size } = req.body
+        const { itemId, size } = req.body;
+        let userId = req.body.userId;
 
-        const userData = await userModel.findById(userId)
-        let cartData = await userData.cartData;
+        let query = mongoose.Types.ObjectId.isValid(userId) ? { _id: userId } : { guestId: userId };
 
-        if (cartData[itemId]) {
-            if (cartData[itemId][size]) {
-                cartData[itemId][size] += 1
+        let user = await userModel.findOne(query);
+
+        if (!user) {
+            if (!userId.startsWith("guest_")) {
+                return res.status(404).json({ message: "User not found" });
             }
-            else {
-                cartData[itemId][size] = 1
-            }
-        } else {
-            cartData[itemId] = {}
-            cartData[itemId][size] = 1
+            user = await userModel.create({ guestId: userId, name: `Guest_${userId}`, userType: "guest" });
         }
 
-        await userModel.findByIdAndUpdate(userId, {cartData})
+        let cartData = user.cartData || {};
 
-        res.json({ success: true, message: "Added To Cart" })
+        if (!cartData[itemId]) {
+            cartData[itemId] = {};
+        }
+        cartData[itemId][size] = (cartData[itemId][size] || 0) + 1;
+
+        await userModel.findOneAndUpdate(query, { cartData });
+
+        res.status(200).json({ message: "Item added to cart!", guestId: userId });
 
     } catch (error) {
-        console.log(error)
-        res.json({ success: false, message: error.message })
+        res.status(500).json({ error: error.message });
     }
-}
+};
 
-// update user cart
-const updateCart = async (req,res) => {
+// updateCart function (Backend)
+const updateCart = async (req, res) => {
     try {
-        
-        const { userId ,itemId, size, quantity } = req.body
+        const { userId, itemId, size, quantity } = req.body;
 
-        const userData = await userModel.findById(userId)
-        let cartData = await userData.cartData;
+        let query = mongoose.Types.ObjectId.isValid(userId) ? { _id: userId } : { guestId: userId };
 
-        cartData[itemId][size] = quantity
+        let user = await userModel.findOne(query);
+        if (!user) return res.status(404).json({ message: "User not found" });
 
-        await userModel.findByIdAndUpdate(userId, {cartData})
-        res.json({ success: true, message: "Cart Updated" })
+        let cartData = user.cartData || {};
+        if (cartData[itemId] && cartData[itemId][size] !== undefined) {
+            cartData[itemId][size] = quantity;
+        }
+
+        await userModel.findOneAndUpdate(query, { cartData });
+
+        res.json({ success: true, message: "Cart Updated" });
 
     } catch (error) {
-        console.log(error)
-        res.json({ success: false, message: error.message })
+        console.log(error);
+        res.status(500).json({ success: false, message: error.message });
     }
-}
+};
 
-
-// get user cart data
-const getUserCart = async (req,res) => {
-
+// getUserCart function (Backend)
+const getUserCart = async (req, res) => {
     try {
-        
-        const { userId } = req.body
-        
-        const userData = await userModel.findById(userId)
-        let cartData = await userData.cartData;
+        const { userId } = req.body;
+        console.log("Received userId:", userId);  // ✅ Debugging
 
-        res.json({ success: true, cartData })
+        if (!userId) return res.status(400).json({ message: "Missing userId" });
+
+        let query = mongoose.Types.ObjectId.isValid(userId)
+            ? { _id: userId }
+            : { guestId: userId };
+
+        let user = await userModel.findOne(query);
+        if (!user) return res.status(404).json({ message: "User not found using as guest" });
+
+        res.json({ success: true, cartData: user.cartData });
 
     } catch (error) {
-        console.log(error)
-        res.json({ success: false, message: error.message })
+        console.log(error);
+        res.status(500).json({ success: false, message: error.message });
     }
+};
 
-}
+
 
 export { addToCart, updateCart, getUserCart }
